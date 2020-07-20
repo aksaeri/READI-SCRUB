@@ -53,7 +53,7 @@ d3 <- d3 %>% dplyr::select(-matches("bar_fogg_\\w+_[0-9]*$"), -matches("INFO_NEE
 d4 <- fetch_survey(surveyID = "SV_8d1Q951KB41wsaV",
                    unanswer_recode = -99,include_display_order = F,
                    force_request = T, breakout_sets = T,
-                   time_zone = Sys.timezone(), label = T)
+                   time_zone = Sys.timezone(), label = T, convert = F)
 
 d4_breakouts <- d4 %>% dplyr::select(matches("bar_fogg_\\w+_[0-9]*$"), matches("INFO_NEED_W2_[0-9]*$"), matches("cald_atsi_[0-9]*$"), matches("manipulation_check_[0-9]*$"))
 d4 <- d4 %>% dplyr::select(-matches("bar_fogg_\\w+_[0-9]*$"), -matches("INFO_NEED_W2_[0-9]*$"), -matches("cald_atsi_[0-9]*$"), -matches("manipulation_check_[0-9]*$"))
@@ -141,7 +141,6 @@ d7 <- d7 %>% dplyr::select(-matches("bar_fogg_\\w+_[0-9]*$"),
 # * Recode checkboxes -----------------------------------------------------
 
 make_miss_false <- function(col_to_na){
-  #col_to_na <- d6_boxes[, 1]
   col_to_na[col_to_na=="99"] <- "-99"
   col_to_na[col_to_na=="No"] <- "-99"
   col_to_na[col_to_na=="FALSE"] <- "-99"
@@ -207,12 +206,12 @@ names(d7) <- tolower(names(d7))
 
 
 #Rename two fields so they match old data sets and are processed the same way
-d5 <- dplyr::rename(d5,likely_app = intentions_download)
+d5 <- d5 %>% dplyr::rename(likely_app = intentions_download, # premeasure
+                           intentions_download = intentions_download_1) # postmeasure
+
 d5$area_code_1_text[is.na(d5$area_code_1_text)] <- d5$ausonly_postcode[is.na(d5$area_code_1_text)]
 d5$state[!is.na(d5$ausonly_state)] <- d5$ausonly_state[!is.na(d5$ausonly_state)]
 d6$state[!is.na(d6$ausonly_state)] <- d6$ausonly_state[!is.na(d6$ausonly_state)]
-d5 <- dplyr::rename(d5, intentions_download = intentions_download_1)
-d6$w4_rules_knowledge_gatherpublic[!is.na(d6$w4_rules_kowledge_gatherpublic)] <- d6$w4_rules_kowledge_gatherpublic[!is.na(d6$w4_rules_kowledge_gatherpublic)]
 
 
 #fix alcohol typo (if not already)
@@ -220,7 +219,6 @@ d6$w4_rules_knowledge_gatherpublic[!is.na(d6$w4_rules_kowledge_gatherpublic)] <-
 # names(d4)[names(d4)=="othb_alocohol"] <- "othb_alcohol"
 # d2 <- dplyr::rename(d2, conf_natleaders = conf_leaders,
 #                     conf_stateleaders = conf_7)
-
 
 
 # * Join waves ------------------------------------------------------------
@@ -234,9 +232,6 @@ d <- rbind.fill(d, d6)
 
 #find new variables to add that aren't checkboxes 
 new_vars <- function(newdf, new_checkboxes, olddf){
-  #newdf <- d7
-  #new_checkboxes <- d7_breakouts
-  #olddf <- d
   old_names <- (names(newdf)%in%names(d) | names(newdf)%in%names(new_checkboxes))
   new_names <- names(newdf)[!old_names]
   new_names
@@ -244,28 +239,53 @@ new_vars <- function(newdf, new_checkboxes, olddf){
 clean_me <- new_vars(d7, d7_breakouts, d)
 
 d <- rbind.fill(d, d7)
-#d <- ?rbind.fill(d, brazil)
-d <- d[colSums(is.na(d))!=dim(d)[1]] #qualtrics has exported some deleted variables so remove the completely empty ones
+# d <- rbind.fill(d, brazil)
+
+# remove any empty columns
+d <- d %>% janitor::remove_empty("cols")
 
 ##pulling straight out of qualtrics creates a few ordered factors but the code below 
 ##was built for processing the values from qualtrics csvs so convert them back :(
-ordered_factors <- grepl("ordered",sapply(d, class))
-d[, ordered_factors] <- lapply(d[, ordered_factors], as_character)
+# ordered_factors <- grepl("ordered",sapply(d, class))
+# d[, ordered_factors] <- lapply(d[, ordered_factors], as_character)
 
-# dclasses <- unlist(sapply(d, class))
-# dclasses <- dclasses[order(names(dclasses))]
-# 
-# oldclasses <- unlist(sapply(saved_attributes, class))
-# oldclasses <- oldclasses[order(names(oldclasses))]
-
-
+# Order by completion date and save attributes in case needed later
+d <- arrange(d, desc(startdate))
 saved_attributes <- d
 #d <- saved_attributes
+
+# Remove ineligible responses ---------------------------------------------
+
+# remove non-consenters
+d <- dplyr::filter(d, grepl("agree to participate", consent))
+
+#remove preview responses and those less than 5 minutes
+d <- dplyr::filter(d, status != "Survey Preview")
+d <- dplyr::filter(d, status != "Survey Test")
+d <- dplyr::filter(d, status != "Spam")
+d <- dplyr::filter(d, `duration (in seconds)` >= (5*60) )
+d <- dplyr::filter(d, `duration (in seconds)` <= (24*60*60) )
+
+# remove incomplete responses
+d <- dplyr::filter(d, finished == "TRUE")
+
+# ORU responses should have only Australian data.
+d <- d %>% dplyr::filter((grepl("oru_export",origin) & country == "Australia") | 
+                      grepl("master_export",origin))
+
+
+# manually remove any testing responses
+d <- d %>% filter(responseid != "R_b96aPTGwlYJg2hX", # Luca
+                  responseid != "R_2pY5a7K2w4XqKtS") # Kate
+
+
+
 
 #for all questions except interventions, make unanswered NA
 intervention_qns <- grepl("_pledge", names(d))
 intervention_qns[1:8] <- T #remove date from the process
 
+# 
 make_miss_na <- function(col_to_na){
   col_to_na[col_to_na=="-99"] <- NA
   col_to_na[col_to_na=="99"] <- NA
@@ -273,18 +293,6 @@ make_miss_na <- function(col_to_na){
 }
 d[, !intervention_qns] <- lapply(d[, !intervention_qns], make_miss_na)
 
-d$email <- as_character(d$email)
-d$recipientemail <- as_character(d$recipientemail)
-d$responseid <- as_character(d$responseid)
-
-d <- dplyr::rename(d, aware_factors_pos = aware_factors,
-                   aware_factors_neg = unaware_factors,
-                   capa_factors_pos = capa_factors,
-                   capa_factors_neg = capa_factors_d,
-                   opp_factors_pos = opp_factors,
-                   opp_factors_neg = opp_factors_d,
-                   motiv_factors_pos = motiv_factors,
-                   motiv_factors_neg = motiv_factors_neg)
 
 generic_conversion <- function(var_to_change, ordered_levels, ord){
   var_to_change <- gsub("[[:punct:]]", "", var_to_change) #sometimes labels aren't matching due to differences in ascii so remove punctuation
@@ -298,6 +306,21 @@ generic_conversion <- function(var_to_change, ordered_levels, ord){
                           levels = ordered_levels)
   return(var_to_change)
 }
+
+
+d <- dplyr::rename(d, aware_factors_pos = aware_factors,
+                   aware_factors_neg = unaware_factors,
+                   capa_factors_pos = capa_factors,
+                   capa_factors_neg = capa_factors_d,
+                   opp_factors_pos = opp_factors,
+                   opp_factors_neg = opp_factors_d,
+                   motiv_factors_pos = motiv_factors,
+                   motiv_factors_neg = motiv_factors_neg)
+
+
+# Wave to wave matching ---------------------------------------------------
+
+
 
 ## Match wave 1 and wave 2 participant IDs
 library(readxl)
@@ -328,17 +351,6 @@ for(i in 1:length(rows_to_overwrite_id)){
   d$id[rows_to_overwrite_id[i]] <- link_matching_table$W3_Email[which(link_matching_table$W2_RespID==d[rows_to_overwrite_id[i],"responseid"])]
 }
 
-# remove non-consenters
-d$consent <- factor(d$consent)
-d <- dplyr::filter(d, consent != 1)
-d <- dplyr::select(d, -consent, -q_url)
-
-#remove preview responses and those less than 5 minutes
-d <- dplyr::filter(d, status != "Survey Preview")
-#d <- dplyr::filter(d, status != "test")
-d <- dplyr::filter(d, `duration (in seconds)` >= (5*60) )
-d <- dplyr::filter(d, `duration (in seconds)` <= (24*60*60) )
-
 #find when emails have been used more than once
 d$email <- stringr::str_to_lower(d$email)
 d$recipientemail <- stringr::str_to_lower(d$recipientemail)
@@ -351,19 +363,7 @@ for(i in unique(d$email[!is.na(d$email)&d$email!="test"])){
 }
 
 
-# remove testing responses
-d <- d %>% filter(responseid != "R_b96aPTGwlYJg2hX", # Luca
-                  responseid != "R_2pY5a7K2w4XqKtS") # Kate
-
-
-
-#table(d$othb_cancel_travel)
-
-#just reversing the order so new data is easier to inspect
-d <- arrange(d, desc(startdate))
-
 # remove unnecessary meta-data
-
 # head(d)
 
 d <- dplyr::select(d, -enddate:-userlanguage)
@@ -1293,10 +1293,10 @@ library(readxl)
 regions <- read_xls("CG_POSTCODE_2017_RA_2016.xls", 4, skip = 5)
 regions <- regions[!is.na(regions$POSTCODE_2017...1),]
 d$region_aus <- as_numeric(NA)
+d$region_aus_type <- as_character(NA)
 d$region_aus[which_aus] <- regions$RA_CODE_2016[match(d[which_aus,names(d)=="area_code"],
                                                       regions$POSTCODE_2017...1)]
 d$region_aus <- as_numeric(d$region_aus)
-d$region_aus_type <- as.character(NA)
 d$region_aus_type[which_aus] <- regions$RA_NAME_2016[match(d[which_aus,names(d)=="area_code"],
                                                 regions$POSTCODE_2017...1)]
 d$region_aus_type <- as_factor(d$region_aus_type)
@@ -1309,7 +1309,7 @@ d$region_aus_type <- forcats::fct_recode(d$region_aus_type,
                   "Remote" = "Remote Australia",
                   "Very Remote" = "Very Remote Australia")
 
-d$region_aus_type <- sjlabelled::as_factor(d$region_aus_type,
+d$region_aus_type <- factor(d$region_aus_type,
                     levels = c("Major city",
                     "Inner regional",
                     "Outer regional",
@@ -1318,16 +1318,14 @@ d$region_aus_type <- sjlabelled::as_factor(d$region_aus_type,
 
 # @@AS I somehow broke this inhab_labels, possibly due to an PC/MAC encoding issue for "less
 # than or equal to" (it shows as garbled characters on my screen)
-inhab_labels <- "5,000 people or less  (1) 
+inhab_labels <- "â¤ 5,000 people  (1) 
 o	5,001 - 20,000  (2) 
 o	20,001 - 100,000  (3) 
 o	100,001 - 500,000  (4) 
-o	500,000 people or more  (5)"
+o	> 500,000 people  (5)"
 
 d$inhabitants <- factor(d$inhabitants, ordered = T,
                            levels = convert_radio_to_labs(inhab_labels))
-library(forcats)
-d$inhabitants <- fct_recode(d$inhabitants, "5,000 people or less"="≤ 5,000 people")
 
 sac_cols <- grep("_sac$",names(d))
 
@@ -1399,13 +1397,36 @@ for(i in get_these_attributes){
   #get_label(d[,i])
 }
 #Manually reset a few troublesome labels
-set_label(d$swb4) <- " Overall, how anxious did you feel yesterday?"
+set_label(d$swb4) <- "Overall, how anxious did you feel yesterday?"
 set_label(d$othb_treat_alt) <- "Used natural or alternative medicines to prevent or treat COVID-19"
 set_label(d$othb_treat_conv) <- "Used prescribed medicines to prevent or treat COVID-19"
 set_label(d$beh_distance) <- "Keep physical distance from people in public, school, or workplace"
 
 w4_ints <- grepl("w4_txtffd_", names(d))
 d[, w4_ints] <- lapply(d[, w4_ints],make_miss_false)
+
+
+# Rename variables --------------------------------------------------------
+
+
+# fix names
+d <- d %>% dplyr::rename(
+  public_w3_pastwk_beh = w3_pastwk_beh_pub,
+  active_w3_pastwk_beh = w3_pt_pastwk_beh_act,
+  private_w3_pastwk_beh = w3_pt_pastwk_beh_pri,
+  public_w3_int = w3_pt_int_pub,
+  active_w3_int = w3_pt_int_act,
+  private_w3_int = w3_pt_int_pri,
+  public_w3_risk = w3_pt_risk_pub,
+  active_w3_risk = w3_pt_risk_act,
+  private_w3_risk = w3_pt_risk_pri,
+  public_w3_postvic = w3_pt_postvic_pub,
+  active_w3_postvic = w3_pt_postvic_act,
+  private_w3_postvic = w3_pt_postvic_pri,
+  govtpay_w3_pastwk_yn_beh = w3_pastwk_beh_govtpay,
+  tested_w3_pastwk_yn_beh = w3_pastwk_beh_tested)
+
+
 
 #Checking what's still a text variable:
 #names(d)[sapply(d, is.character)]
